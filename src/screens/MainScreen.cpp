@@ -639,6 +639,11 @@ void MainScreen::onGitTaskCompleted(GitTaskResult result)
         }
     }
 
+    // Clear message input after successful commit or branch creation
+    if (result.task == GitTask::Commit || result.task == GitTask::CreateBranch) {
+        m_messageInput->clear();
+    }
+
     // Push after successful commit if pending
     if (result.task == GitTask::Commit && m_pendingPush) {
         m_pendingPush = false;
