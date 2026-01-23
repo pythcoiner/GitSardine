@@ -428,8 +428,13 @@ GitTaskResult GitWorker::handleCheckStatus(const GitTaskRequest& req)
     statusData["needsPull"] = behind > 0;
     statusData["hasError"] = false;
 
+    // Wrap with path for consistent handling in MainScreen
+    QVariantMap resultData;
+    resultData["path"] = req.repoPath;
+    resultData["status"] = statusData;
+
     result.success = true;
-    result.data = statusData;
+    result.data = resultData;
     return result;
 }
 
