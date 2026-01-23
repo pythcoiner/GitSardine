@@ -4,7 +4,9 @@
 
 set -e
 
+# Get project root (parent of contrib/)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 echo "=== GitSardine Installer ==="
 
@@ -20,9 +22,18 @@ if [ ! -d /nix ] || [ ! -d /nix/store ]; then
     fi
 fi
 
-# Source nix profile if available
-if [ -f /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then
-    . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+# Source nix if not already available
+if ! command -v nix &> /dev/null; then
+    NIX_DAEMON_SCRIPT="${NIX_DAEMON_SCRIPT:-}"
+    if [ -n "$NIX_DAEMON_SCRIPT" ] && [ -f "$NIX_DAEMON_SCRIPT" ]; then
+        . "$NIX_DAEMON_SCRIPT"
+    elif [ -f /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh ]; then
+        . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+    elif [ -f ~/.nix-profile/etc/profile.d/nix.sh ]; then
+        . ~/.nix-profile/etc/profile.d/nix.sh
+    elif [ -f /etc/profile.d/nix.sh ]; then
+        . /etc/profile.d/nix.sh
+    fi
 fi
 
 # Install nix if not present
@@ -46,35 +57,35 @@ if ! nix flake --help &> /dev/null 2>&1; then
     fi
 fi
 
-mkdir -p "$SCRIPT_DIR/deps"
+mkdir -p "$PROJECT_ROOT/deps"
 
 # Pull qontrol dependency
 echo ""
 echo "Pulling qontrol dependency..."
-if [ -d "$SCRIPT_DIR/deps/qontrol/.git" ]; then
+if [ -d "$PROJECT_ROOT/deps/qontrol/.git" ]; then
     echo "qontrol already exists, updating..."
-    (cd "$SCRIPT_DIR/deps/qontrol" && git pull)
+    (cd "$PROJECT_ROOT/deps/qontrol" && git pull)
 else
     echo "Cloning qontrol..."
-    git clone https://github.com/pythcoiner/qontrol.git "$SCRIPT_DIR/deps/qontrol"
+    git clone https://github.com/pythcoiner/qontrol.git "$PROJECT_ROOT/deps/qontrol"
 fi
 
 # Pull qt_static for static Qt6 build
 echo ""
 echo "Pulling qt_static for static Qt6..."
-if [ -d "$SCRIPT_DIR/deps/qt_static/.git" ]; then
+if [ -d "$PROJECT_ROOT/deps/qt_static/.git" ]; then
     echo "qt_static already exists, updating..."
-    (cd "$SCRIPT_DIR/deps/qt_static" && git pull)
+    (cd "$PROJECT_ROOT/deps/qt_static" && git pull)
 else
     echo "Cloning qt_static..."
-    git clone https://github.com/pythcoiner/qt_static.git "$SCRIPT_DIR/deps/qt_static"
+    git clone https://github.com/pythcoiner/qt_static.git "$PROJECT_ROOT/deps/qt_static"
 fi
 
 # Build static Qt6 for Linux
-if [ ! -d "$SCRIPT_DIR/deps/qt_static/dist/linux" ]; then
+if [ ! -d "$PROJECT_ROOT/deps/qt_static/dist/linux" ] && [ ! -L "$PROJECT_ROOT/deps/qt_static/dist/linux" ]; then
     echo ""
     echo "Building static Qt6 for Linux (this may take 20-30 minutes)..."
-    (cd "$SCRIPT_DIR/deps/qt_static" && ./build.sh linux)
+    (cd "$PROJECT_ROOT/deps/qt_static" && ./build.sh linux)
 else
     echo ""
     echo "Static Qt6 already built."

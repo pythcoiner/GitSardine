@@ -2,50 +2,17 @@
   description = "GitSardine - Git repository manager";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.05";
-    qt_static = {
-      url = "path:./deps/qt_static";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+    # Use nixos-22.11 for glibc 2.35 (Ubuntu 22.04+ compatibility)
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-22.11";
   };
 
-  outputs = { self, nixpkgs, qt_static }:
+  outputs = { self, nixpkgs }:
     let
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
-
-      # Get Qt from qt_static (must be built first with ./deps/qt_static/build.sh linux)
-      qt6Static = qt_static.packages.${system}.linux;
-
-    in
-    {
+    in {
       devShells.${system}.default = pkgs.mkShell {
         name = "gitsardine-dev";
-
-        buildInputs = [
-          qt6Static
-          pkgs.cmake
-          pkgs.ninja
-          pkgs.pkg-config
-          pkgs.git
-          pkgs.libgit2
-        ];
-
-        shellHook = ''
-          echo "GitSardine Development Shell"
-          echo "============================="
-          echo "Static Qt6: ${qt6Static}"
-          echo ""
-          export QT_DIR="${qt6Static}"
-          export CMAKE_PREFIX_PATH="${qt6Static}"
-        '';
-      };
-
-      packages.${system}.default = pkgs.stdenv.mkDerivation {
-        pname = "gitsardine";
-        version = "1.0.0";
-
-        src = ./.;
 
         nativeBuildInputs = [
           pkgs.cmake
@@ -54,13 +21,67 @@
         ];
 
         buildInputs = [
-          qt6Static
+          # Qt static dependencies (needed at link time)
+          pkgs.zlib
+          pkgs.libb2
+          pkgs.pcre2
+          pkgs.double-conversion
+          pkgs.openssl
+          pkgs.libpng
+          pkgs.libjpeg
+          pkgs.sqlite
+          pkgs.glib
+          pkgs.fontconfig
+          pkgs.freetype
+          pkgs.harfbuzz
+          pkgs.dbus
+          pkgs.at-spi2-core
+          pkgs.libinput
+          pkgs.mtdev
+          pkgs.systemd
+
+          # X11
+          pkgs.xorg.libX11
+          pkgs.xorg.libXext
+          pkgs.xorg.libXrender
+          pkgs.xorg.libXi
+          pkgs.xorg.libXcursor
+          pkgs.xorg.libXrandr
+          pkgs.xorg.libXinerama
+          pkgs.xorg.libXfixes
+          pkgs.xorg.libXcomposite
+          pkgs.xorg.libXdamage
+          pkgs.xorg.libxcb
+          pkgs.xorg.xcbutil
+          pkgs.xorg.xcbutilwm
+          pkgs.xorg.xcbutilimage
+          pkgs.xorg.xcbutilkeysyms
+          pkgs.xorg.xcbutilrenderutil
+          pkgs.xorg.xcbutilcursor
+          pkgs.xorg.libSM
+          pkgs.xorg.libICE
+          pkgs.xorg.libxshmfence
+          pkgs.libxkbcommon
+
+          # Wayland
+          pkgs.wayland
+          pkgs.wayland-protocols
+
+          # Graphics
+          pkgs.mesa
+          pkgs.libGL
+          pkgs.vulkan-headers
+          pkgs.vulkan-loader
+          pkgs.libdrm
+
+          # Project dependencies
           pkgs.libgit2
         ];
 
-        cmakeFlags = [
-          "-DCMAKE_PREFIX_PATH=${qt6Static}"
-        ];
+        shellHook = ''
+          echo "GitSardine Development Shell (glibc 2.35)"
+          echo "=========================================="
+        '';
       };
     };
 }
