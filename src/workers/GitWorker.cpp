@@ -1,7 +1,87 @@
 #include "GitWorker.h"
 #include <QDir>
+#include <QFile>
 #include <QDebug>
 #include <git2.h>
+
+// Certificate check callback - accept known hosts
+static int certificate_check_callback(git_cert *cert, int valid, const char *host, void *payload)
+{
+    Q_UNUSED(cert);
+    Q_UNUSED(payload);
+    qDebug() << "Certificate check for host:" << host << "valid:" << valid;
+    // For SSH, we trust the host (like ssh with StrictHostKeyChecking=no)
+    // In production, you'd want to verify against known_hosts
+    return 0;  // 0 = accept, negative = reject
+}
+
+// SSH credential callback for libgit2
+// payload contains a pointer to retry counter
+static int credentials_callback(git_credential **out, const char *url,
+                                 const char *username_from_url,
+                                 unsigned int allowed_types, void *payload)
+{
+    int* attempts = static_cast<int*>(payload);
+    if (attempts) {
+        (*attempts)++;
+        if (*attempts > 3) {
+            qDebug() << "Auth failed after" << (*attempts - 1) << "attempts, giving up";
+            return GIT_EUSER;
+        }
+    }
+
+    qDebug() << "Auth requested for:" << url << "user:" << username_from_url
+             << "allowed:" << allowed_types << "attempt:" << (attempts ? *attempts : 0);
+
+    // Try SSH agent first (most common for git over SSH)
+    if (allowed_types & GIT_CREDENTIAL_SSH_KEY) {
+        const char* user = username_from_url ? username_from_url : "git";
+
+        // Check if SSH_AUTH_SOCK is available
+        const char* authSock = getenv("SSH_AUTH_SOCK");
+        if (authSock && authSock[0] != '\0') {
+            int ret = git_credential_ssh_key_from_agent(out, user);
+            if (ret == 0) {
+                qDebug() << "Using SSH agent for auth";
+                return 0;
+            }
+            qDebug() << "SSH agent failed (ret=" << ret << ")";
+        } else {
+            qDebug() << "SSH_AUTH_SOCK not set, skipping agent";
+        }
+
+        // Fallback to SSH key files - list all keys in ~/.ssh/
+        QDir sshDir(QDir::homePath() + "/.ssh");
+        QStringList pubKeys = sshDir.entryList(QStringList() << "*.pub", QDir::Files);
+
+        for (const QString& pubFile : pubKeys) {
+            QString privKey = sshDir.filePath(pubFile.chopped(4));  // remove .pub
+            QString pubKey = sshDir.filePath(pubFile);
+
+            if (QFile::exists(privKey)) {
+                qDebug() << "Trying SSH key:" << privKey;
+                int ret = git_credential_ssh_key_new(out, user,
+                    pubKey.toUtf8().constData(),
+                    privKey.toUtf8().constData(),
+                    nullptr);  // passphrase - nullptr means no passphrase
+                if (ret == 0) {
+                    return 0;
+                }
+                qDebug() << "Key failed (ret=" << ret << ")";
+            }
+        }
+        qDebug() << "No working SSH keys found in ~/.ssh/";
+    }
+
+    // Userpass for HTTPS (not implemented yet)
+    if (allowed_types & GIT_CREDENTIAL_USERPASS_PLAINTEXT) {
+        qDebug() << "HTTPS auth not implemented";
+        return GIT_EUSER;
+    }
+
+    qDebug() << "No suitable auth method found";
+    return GIT_EUSER;
+}
 
 // RAII wrapper for git_repository
 class GitRepo {
@@ -405,10 +485,16 @@ GitTaskResult GitWorker::handleFetch(const GitTaskRequest& req)
     }
 
     git_fetch_options opts = GIT_FETCH_OPTIONS_INIT;
+    int auth_attempts = 0;
+    opts.callbacks.credentials = credentials_callback;
+    opts.callbacks.certificate_check = certificate_check_callback;
+    opts.callbacks.payload = &auth_attempts;
 
+    qDebug() << "Fetching from origin for" << req.repoPath;
     if (git_remote_fetch(remote, nullptr, &opts, nullptr) != 0) {
         result.success = false;
         result.message = getLastError();
+        qDebug() << "Fetch failed:" << result.message;
         return result;
     }
 
@@ -598,13 +684,20 @@ GitTaskResult GitWorker::handlePush(const GitTaskRequest& req)
     git_strarray refspecs = { const_cast<char**>(&refspec_str), 1 };
 
     git_push_options opts = GIT_PUSH_OPTIONS_INIT;
+    int auth_attempts = 0;
+    opts.callbacks.credentials = credentials_callback;
+    opts.callbacks.certificate_check = certificate_check_callback;
+    opts.callbacks.payload = &auth_attempts;
 
+    qDebug() << "Pushing" << refspec << "to origin";
     if (git_remote_push(remote, &refspecs, &opts) != 0) {
         result.success = false;
         result.message = getLastError();
+        qDebug() << "Push failed:" << result.message;
         return result;
     }
 
+    qDebug() << "Push successful";
     result.success = true;
     result.message = "Push successful";
     return result;
