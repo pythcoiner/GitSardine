@@ -10,10 +10,6 @@
 #include <QStringList>
 #include <QVariant>
 
-#ifdef USE_LIBGIT2
-#include <git2.h>
-#endif
-
 /**
  * Git task types that can be executed by GitWorker
  */
@@ -72,7 +68,7 @@ struct GitTaskResult {
 /**
  * GitWorker - Single thread for ALL git operations
  *
- * Uses libgit2 if available, falls back to QProcess/git CLI otherwise.
+ * Uses libgit2 for all git operations.
  */
 class GitWorker : public QThread {
     Q_OBJECT
@@ -99,15 +95,10 @@ private:
     QWaitCondition m_queueCondition;
     bool m_running;
 
-    // Helper to run git command via QProcess
-    struct GitCommandResult {
-        int exitCode;
-        QString stdOut;
-        QString stdErr;
-    };
-    GitCommandResult runGitCommand(const QString& workDir, const QStringList& args);
+    // Helper to get last libgit2 error
+    QString getLastError();
 
-    // Task handlers (QProcess-based)
+    // Task handlers (libgit2-based)
     GitTaskResult handleCheckStatus(const GitTaskRequest& req);
     GitTaskResult handleCheckAllStatus(const GitTaskRequest& req);
     GitTaskResult handleFetch(const GitTaskRequest& req);

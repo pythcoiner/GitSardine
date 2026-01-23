@@ -98,6 +98,7 @@ private:
     int m_extend;
     int m_nextRequestId;
     bool m_buttonsEnabled;
+    bool m_isMasterBranch;
 
     // Timers
     QTimer* m_spinnerTimer;

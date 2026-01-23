@@ -15,6 +15,7 @@ MainScreen::MainScreen(QWidget *parent)
     , m_extend(190)
     , m_nextRequestId(1)
     , m_buttonsEnabled(false)
+    , m_isMasterBranch(false)
 {
     setupUi();
     setupConnections();
@@ -139,17 +140,17 @@ void MainScreen::createButtons()
     // Commit button
     m_commitBtn = new QPushButton("Commit", this);
     m_commitBtn->setGeometry(100, 600, 61, 25);
-    m_commitBtn->setToolTip("Add & Commit file to branch");
+    m_commitBtn->setToolTip("Add & Commit file to branch (Press ctrl key for unlock on master)");
 
     // Commit+Push button
     m_commitPushBtn = new QPushButton("C + Push", this);
     m_commitPushBtn->setGeometry(165, 600, 61, 25);
-    m_commitPushBtn->setToolTip("Add & Commit file to branch + Push to origin");
+    m_commitPushBtn->setToolTip("Add & Commit file to branch + Push to origin (Press ctrl key for unlock on master)");
 
     // Ignore button
     m_ignoreBtn = new QPushButton("Ignore", this);
     m_ignoreBtn->setGeometry(230, 600, 51, 25);
-    m_ignoreBtn->setToolTip("Add this file to .gitignore file");
+    m_ignoreBtn->setToolTip("Add this file to .gitignore file (Press ctrl key for unlock on master)");
 
     // Merge button
     m_mergeBtn = new QPushButton("Merge", this);
@@ -253,6 +254,11 @@ void MainScreen::lockButtons()
     m_deleteBtn->setEnabled(false);
     m_cleanBtn->setEnabled(false);
     m_deleteFileBtn->setEnabled(false);
+    if (m_isMasterBranch) {
+        m_commitBtn->setEnabled(false);
+        m_commitPushBtn->setEnabled(false);
+        m_ignoreBtn->setEnabled(false);
+    }
 }
 
 void MainScreen::unlockButtons()
@@ -261,15 +267,26 @@ void MainScreen::unlockButtons()
         m_deleteBtn->setEnabled(true);
         m_cleanBtn->setEnabled(true);
         m_deleteFileBtn->setEnabled(true);
+        if (m_isMasterBranch) {
+            m_commitBtn->setEnabled(true);
+            m_commitPushBtn->setEnabled(true);
+            m_ignoreBtn->setEnabled(true);
+        }
     }
 }
 
 void MainScreen::updateBranchVisibility()
 {
-    bool isMainBranch = (m_currentBranch == "master" || m_currentBranch == "main");
-    m_commitBtn->setVisible(!isMainBranch);
-    m_commitPushBtn->setVisible(!isMainBranch);
-    m_ignoreBtn->setVisible(!isMainBranch);
+    m_isMasterBranch = (m_currentBranch == "master" || m_currentBranch == "main");
+    if (m_isMasterBranch) {
+        m_commitBtn->setEnabled(false);
+        m_commitPushBtn->setEnabled(false);
+        m_ignoreBtn->setEnabled(false);
+    } else if (m_buttonsEnabled) {
+        m_commitBtn->setEnabled(true);
+        m_commitPushBtn->setEnabled(true);
+        m_ignoreBtn->setEnabled(true);
+    }
 }
 
 void MainScreen::keyPressEvent(QKeyEvent* event)
@@ -312,9 +329,11 @@ void MainScreen::updateAllRepoStatus()
 
 void MainScreen::onExtendClicked()
 {
+    QWidget* win = window();
     if (!m_isExtended) {
         m_isExtended = true;
         m_extendBtn->setIcon(loadIcon(icon_navigation_180_button_white_png, icon_navigation_180_button_white_png_len));
+        if (win) win->setFixedWidth(win->width() + m_extend);
         setFixedWidth(width() + m_extend);
         m_repoTree->setFixedWidth(m_repoTree->width() + m_extend);
         m_changesTree->setFixedWidth(m_changesTree->width() + m_extend);
@@ -322,6 +341,7 @@ void MainScreen::onExtendClicked()
     } else {
         m_isExtended = false;
         m_extendBtn->setIcon(loadIcon(icon_navigation_000_button_white_png, icon_navigation_000_button_white_png_len));
+        if (win) win->setFixedWidth(win->width() - m_extend);
         setFixedWidth(width() - m_extend);
         m_repoTree->setFixedWidth(m_repoTree->width() - m_extend);
         m_changesTree->setFixedWidth(m_changesTree->width() - m_extend);

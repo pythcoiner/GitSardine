@@ -12,18 +12,13 @@ endif()
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
 
-# Try to find libgit2 (optional)
-find_package(PkgConfig)
-if(PkgConfig_FOUND)
-    pkg_check_modules(LIBGIT2 libgit2)
-endif()
-
-if(LIBGIT2_FOUND)
-    message(STATUS "Found libgit2 - using native git library")
-    add_compile_definitions(USE_LIBGIT2)
-else()
-    message(STATUS "libgit2 not found - using QProcess for git commands")
-endif()
+# Find libgit2 and its dependencies (required)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBGIT2 REQUIRED IMPORTED_TARGET libgit2)
+pkg_check_modules(PCRE2 REQUIRED IMPORTED_TARGET libpcre2-8)
+pkg_check_modules(OPENSSL REQUIRED IMPORTED_TARGET openssl)
+pkg_check_modules(LIBSSH2 IMPORTED_TARGET libssh2)
+message(STATUS "Found libgit2 ${LIBGIT2_VERSION}")
 
 # Add qontrol
 add_subdirectory(deps/qontrol)
@@ -55,12 +50,11 @@ target_include_directories(gitsardine PRIVATE
     ${CMAKE_SOURCE_DIR}/resources
 )
 
-if(LIBGIT2_FOUND)
-    target_include_directories(gitsardine PRIVATE ${LIBGIT2_INCLUDE_DIRS})
-    target_link_libraries(gitsardine PRIVATE ${LIBGIT2_LIBRARIES})
-endif()
-
 target_link_libraries(gitsardine PRIVATE
+    PkgConfig::LIBGIT2
+    PkgConfig::PCRE2
+    PkgConfig::OPENSSL
+    $<$<BOOL:${LIBSSH2_FOUND}>:PkgConfig::LIBSSH2>
     qontrol
     Qt6::Core
     Qt6::Gui

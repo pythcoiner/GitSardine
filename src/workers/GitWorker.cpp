@@ -1,23 +1,147 @@
 #include "GitWorker.h"
 #include <QDir>
-#include <QFile>
-#include <QTextStream>
-#include <QProcess>
 #include <QDebug>
+#include <git2.h>
+
+// RAII wrapper for git_repository
+class GitRepo {
+public:
+    git_repository* repo = nullptr;
+
+    GitRepo() = default;
+    ~GitRepo() { if (repo) git_repository_free(repo); }
+
+    bool open(const QString& path) {
+        return git_repository_open(&repo, path.toUtf8().constData()) == 0;
+    }
+
+    operator git_repository*() { return repo; }
+    git_repository* get() { return repo; }
+};
+
+// RAII wrapper for git_reference
+class GitRef {
+public:
+    git_reference* ref = nullptr;
+
+    GitRef() = default;
+    ~GitRef() { if (ref) git_reference_free(ref); }
+
+    operator git_reference*() { return ref; }
+    git_reference** ptr() { return &ref; }
+};
+
+// RAII wrapper for git_remote
+class GitRemote {
+public:
+    git_remote* remote = nullptr;
+
+    GitRemote() = default;
+    ~GitRemote() { if (remote) git_remote_free(remote); }
+
+    operator git_remote*() { return remote; }
+    git_remote** ptr() { return &remote; }
+};
+
+// RAII wrapper for git_index
+class GitIndex {
+public:
+    git_index* index = nullptr;
+
+    GitIndex() = default;
+    ~GitIndex() { if (index) git_index_free(index); }
+
+    operator git_index*() { return index; }
+    git_index** ptr() { return &index; }
+};
+
+// RAII wrapper for git_signature
+class GitSignature {
+public:
+    git_signature* sig = nullptr;
+
+    GitSignature() = default;
+    ~GitSignature() { if (sig) git_signature_free(sig); }
+
+    operator git_signature*() { return sig; }
+    git_signature** ptr() { return &sig; }
+};
+
+// RAII wrapper for git_status_list
+class GitStatusList {
+public:
+    git_status_list* list = nullptr;
+
+    GitStatusList() = default;
+    ~GitStatusList() { if (list) git_status_list_free(list); }
+
+    operator git_status_list*() { return list; }
+    git_status_list** ptr() { return &list; }
+};
+
+// RAII wrapper for git_diff
+class GitDiff {
+public:
+    git_diff* diff = nullptr;
+
+    GitDiff() = default;
+    ~GitDiff() { if (diff) git_diff_free(diff); }
+
+    operator git_diff*() { return diff; }
+    git_diff** ptr() { return &diff; }
+};
+
+// RAII wrapper for git_object
+class GitObject {
+public:
+    git_object* obj = nullptr;
+
+    GitObject() = default;
+    ~GitObject() { if (obj) git_object_free(obj); }
+
+    operator git_object*() { return obj; }
+    git_object** ptr() { return &obj; }
+};
+
+// RAII wrapper for git_commit
+class GitCommit {
+public:
+    git_commit* commit = nullptr;
+
+    GitCommit() = default;
+    ~GitCommit() { if (commit) git_commit_free(commit); }
+
+    operator git_commit*() { return commit; }
+    git_commit** ptr() { return &commit; }
+};
+
+// RAII wrapper for git_tree
+class GitTree {
+public:
+    git_tree* tree = nullptr;
+
+    GitTree() = default;
+    ~GitTree() { if (tree) git_tree_free(tree); }
+
+    operator git_tree*() { return tree; }
+    git_tree** ptr() { return &tree; }
+};
 
 GitWorker::GitWorker(QObject *parent)
     : QThread(parent)
     , m_running(true)
 {
-    // Register metatypes for signal/slot connections
     qRegisterMetaType<GitTaskRequest>("GitTaskRequest");
     qRegisterMetaType<GitTaskResult>("GitTaskResult");
+
+    git_libgit2_init();
 }
 
 GitWorker::~GitWorker()
 {
     stopWorker();
     wait();
+    git_libgit2_shutdown();
 }
 
 void GitWorker::stopWorker()
@@ -58,10 +182,7 @@ void GitWorker::run()
                 m_queueCondition.wait(&m_queueMutex);
             }
 
-            if (!m_running) {
-                break;
-            }
-
+            if (!m_running) break;
             request = m_taskQueue.dequeue();
         }
 
@@ -127,47 +248,58 @@ void GitWorker::run()
     }
 }
 
-GitWorker::GitCommandResult GitWorker::runGitCommand(const QString& workDir, const QStringList& args)
+QString GitWorker::getLastError()
 {
-    GitCommandResult result;
-    QProcess process;
-    process.setWorkingDirectory(workDir);
-    process.start("git", args);
-
-    if (!process.waitForFinished(60000)) {  // 60 second timeout
-        result.exitCode = -1;
-        result.stdErr = "Command timed out";
-        return result;
+    const git_error* err = git_error_last();
+    if (err) {
+        return QString::fromUtf8(err->message);
     }
-
-    result.exitCode = process.exitCode();
-    result.stdOut = QString::fromUtf8(process.readAllStandardOutput()).trimmed();
-    result.stdErr = QString::fromUtf8(process.readAllStandardError()).trimmed();
-    return result;
+    return "Unknown error";
 }
 
 QString GitWorker::getCurrentBranch(const QString& repoPath)
 {
-    auto result = runGitCommand(repoPath, {"rev-parse", "--abbrev-ref", "HEAD"});
-    if (result.exitCode == 0) {
-        return result.stdOut;
+    GitRepo repo;
+    if (!repo.open(repoPath)) return QString();
+
+    GitRef head;
+    if (git_repository_head(head.ptr(), repo) != 0) return QString();
+
+    const char* name = nullptr;
+    if (git_branch_name(&name, head) == 0) {
+        return QString::fromUtf8(name);
     }
+
     return QString();
 }
 
 int GitWorker::getStashCount(const QString& repoPath)
 {
-    auto result = runGitCommand(repoPath, {"stash", "list"});
-    if (result.exitCode == 0 && !result.stdOut.isEmpty()) {
-        return result.stdOut.split('\n').count();
-    }
-    return 0;
+    GitRepo repo;
+    if (!repo.open(repoPath)) return 0;
+
+    int count = 0;
+    git_stash_foreach(repo, [](size_t, const char*, const git_oid*, void* payload) -> int {
+        (*static_cast<int*>(payload))++;
+        return 0;
+    }, &count);
+
+    return count;
 }
 
 bool GitWorker::hasUncommittedChanges(const QString& repoPath)
 {
-    auto result = runGitCommand(repoPath, {"status", "--porcelain"});
-    return !result.stdOut.isEmpty();
+    GitRepo repo;
+    if (!repo.open(repoPath)) return false;
+
+    git_status_options opts = GIT_STATUS_OPTIONS_INIT;
+    opts.show = GIT_STATUS_SHOW_INDEX_AND_WORKDIR;
+    opts.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED;
+
+    GitStatusList status;
+    if (git_status_list_new(status.ptr(), repo, &opts) != 0) return false;
+
+    return git_status_list_entrycount(status) > 0;
 }
 
 GitTaskResult GitWorker::handleCheckStatus(const GitTaskRequest& req)
@@ -175,26 +307,39 @@ GitTaskResult GitWorker::handleCheckStatus(const GitTaskRequest& req)
     GitTaskResult result;
     result.requestId = req.requestId;
 
+    GitRepo repo;
+    if (!repo.open(req.repoPath)) {
+        result.success = false;
+        result.message = getLastError();
+        return result;
+    }
+
     QVariantMap statusData;
 
-    // Get current branch
+    // Current branch
     QString branch = getCurrentBranch(req.repoPath);
     statusData["currentBranch"] = branch;
 
     // Check for uncommitted changes
-    bool hasChanges = hasUncommittedChanges(req.repoPath);
-    statusData["needsCommit"] = hasChanges;
+    statusData["needsCommit"] = hasUncommittedChanges(req.repoPath);
 
-    // Check ahead/behind using rev-list
-    auto aheadResult = runGitCommand(req.repoPath, {"rev-list", "--count", "@{u}..HEAD"});
-    auto behindResult = runGitCommand(req.repoPath, {"rev-list", "--count", "HEAD..@{u}"});
-
+    // Ahead/behind tracking
     int ahead = 0, behind = 0;
-    if (aheadResult.exitCode == 0) {
-        ahead = aheadResult.stdOut.toInt();
-    }
-    if (behindResult.exitCode == 0) {
-        behind = behindResult.stdOut.toInt();
+
+    GitRef head;
+    if (git_repository_head(head.ptr(), repo) == 0) {
+        GitRef upstream;
+        if (git_branch_upstream(upstream.ptr(), head) == 0) {
+            size_t a = 0, b = 0;
+            const git_oid* local_oid = git_reference_target(head);
+            const git_oid* upstream_oid = git_reference_target(upstream);
+
+            if (local_oid && upstream_oid) {
+                git_graph_ahead_behind(&a, &b, repo, local_oid, upstream_oid);
+                ahead = static_cast<int>(a);
+                behind = static_cast<int>(b);
+            }
+        }
     }
 
     statusData["ahead"] = ahead;
@@ -245,14 +390,25 @@ GitTaskResult GitWorker::handleFetch(const GitTaskRequest& req)
     GitTaskResult result;
     result.requestId = req.requestId;
 
-    auto cmdResult = runGitCommand(req.repoPath, {"fetch", "-v"});
-
-    if (cmdResult.exitCode != 0) {
+    GitRepo repo;
+    if (!repo.open(req.repoPath)) {
         result.success = false;
-        result.message = "Fetch failed";
-        if (!cmdResult.stdErr.isEmpty()) {
-            result.message = cmdResult.stdErr;
-        }
+        result.message = getLastError();
+        return result;
+    }
+
+    GitRemote remote;
+    if (git_remote_lookup(remote.ptr(), repo, "origin") != 0) {
+        result.success = false;
+        result.message = "No origin remote found";
+        return result;
+    }
+
+    git_fetch_options opts = GIT_FETCH_OPTIONS_INIT;
+
+    if (git_remote_fetch(remote, nullptr, &opts, nullptr) != 0) {
+        result.success = false;
+        result.message = getLastError();
         return result;
     }
 
@@ -273,20 +429,138 @@ GitTaskResult GitWorker::handlePull(const GitTaskRequest& req)
         return result;
     }
 
-    QString branch = getCurrentBranch(req.repoPath);
-    auto cmdResult = runGitCommand(req.repoPath, {"pull", "origin", branch});
+    // First fetch
+    GitTaskResult fetchResult = handleFetch(req);
+    if (!fetchResult.success) {
+        return fetchResult;
+    }
 
-    if (cmdResult.exitCode != 0) {
+    GitRepo repo;
+    if (!repo.open(req.repoPath)) {
         result.success = false;
-        result.message = "Pull failed";
-        if (!cmdResult.stdErr.isEmpty()) {
-            result.message = cmdResult.stdErr;
-        }
+        result.message = getLastError();
         return result;
     }
 
-    result.success = true;
-    result.message = QString("%1 is up to date").arg(branch);
+    // Get current branch and its upstream
+    GitRef head;
+    if (git_repository_head(head.ptr(), repo) != 0) {
+        result.success = false;
+        result.message = getLastError();
+        return result;
+    }
+
+    GitRef upstream;
+    if (git_branch_upstream(upstream.ptr(), head) != 0) {
+        result.success = false;
+        result.message = "No upstream branch configured";
+        return result;
+    }
+
+    // Get the upstream commit
+    const git_oid* upstream_oid = git_reference_target(upstream);
+    if (!upstream_oid) {
+        result.success = false;
+        result.message = "Cannot get upstream target";
+        return result;
+    }
+
+    git_annotated_commit* annotated = nullptr;
+    if (git_annotated_commit_lookup(&annotated, repo, upstream_oid) != 0) {
+        result.success = false;
+        result.message = getLastError();
+        return result;
+    }
+
+    // Perform merge analysis
+    git_merge_analysis_t analysis;
+    git_merge_preference_t preference;
+    const git_annotated_commit* heads[] = { annotated };
+
+    if (git_merge_analysis(&analysis, &preference, repo, heads, 1) != 0) {
+        git_annotated_commit_free(annotated);
+        result.success = false;
+        result.message = getLastError();
+        return result;
+    }
+
+    if (analysis & GIT_MERGE_ANALYSIS_UP_TO_DATE) {
+        git_annotated_commit_free(annotated);
+        result.success = true;
+        result.message = "Already up to date";
+        return result;
+    }
+
+    if (analysis & GIT_MERGE_ANALYSIS_FASTFORWARD) {
+        // Fast-forward
+        GitRef new_ref;
+        git_reference_set_target(new_ref.ptr(), head, upstream_oid, "pull: fast-forward");
+
+        git_checkout_options checkout_opts = GIT_CHECKOUT_OPTIONS_INIT;
+        checkout_opts.checkout_strategy = GIT_CHECKOUT_SAFE;
+        git_checkout_head(repo, &checkout_opts);
+
+        git_annotated_commit_free(annotated);
+        result.success = true;
+        result.message = "Fast-forward merge successful";
+        return result;
+    }
+
+    if (analysis & GIT_MERGE_ANALYSIS_NORMAL) {
+        // Normal merge
+        git_merge_options merge_opts = GIT_MERGE_OPTIONS_INIT;
+        git_checkout_options checkout_opts = GIT_CHECKOUT_OPTIONS_INIT;
+        checkout_opts.checkout_strategy = GIT_CHECKOUT_SAFE;
+
+        if (git_merge(repo, heads, 1, &merge_opts, &checkout_opts) != 0) {
+            git_annotated_commit_free(annotated);
+            result.success = false;
+            result.message = getLastError();
+            return result;
+        }
+
+        // Check for conflicts
+        GitIndex index;
+        git_repository_index(index.ptr(), repo);
+        if (git_index_has_conflicts(index)) {
+            git_annotated_commit_free(annotated);
+            result.success = false;
+            result.message = "Merge conflicts - resolve manually";
+            return result;
+        }
+
+        // Create merge commit
+        GitSignature sig;
+        git_signature_default(sig.ptr(), repo);
+
+        git_oid tree_oid;
+        git_index_write_tree(&tree_oid, index);
+
+        GitTree tree;
+        git_tree_lookup(tree.ptr(), repo, &tree_oid);
+
+        GitCommit head_commit;
+        git_commit_lookup(head_commit.ptr(), repo, git_reference_target(head));
+
+        GitCommit upstream_commit;
+        git_commit_lookup(upstream_commit.ptr(), repo, upstream_oid);
+
+        const git_commit* parents[] = { head_commit, upstream_commit };
+        git_oid new_commit_oid;
+        git_commit_create(&new_commit_oid, repo, "HEAD", sig, sig,
+                          nullptr, "Merge branch", tree, 2, parents);
+
+        git_repository_state_cleanup(repo);
+        git_annotated_commit_free(annotated);
+
+        result.success = true;
+        result.message = "Merge successful";
+        return result;
+    }
+
+    git_annotated_commit_free(annotated);
+    result.success = false;
+    result.message = "Cannot merge";
     return result;
 }
 
@@ -295,15 +569,39 @@ GitTaskResult GitWorker::handlePush(const GitTaskRequest& req)
     GitTaskResult result;
     result.requestId = req.requestId;
 
-    QString branch = getCurrentBranch(req.repoPath);
-    auto cmdResult = runGitCommand(req.repoPath, {"push", "origin", branch});
-
-    if (cmdResult.exitCode != 0) {
+    GitRepo repo;
+    if (!repo.open(req.repoPath)) {
         result.success = false;
-        result.message = "Push failed";
-        if (!cmdResult.stdErr.isEmpty()) {
-            result.message = cmdResult.stdErr;
-        }
+        result.message = getLastError();
+        return result;
+    }
+
+    GitRemote remote;
+    if (git_remote_lookup(remote.ptr(), repo, "origin") != 0) {
+        result.success = false;
+        result.message = "No origin remote found";
+        return result;
+    }
+
+    // Get current branch
+    GitRef head;
+    if (git_repository_head(head.ptr(), repo) != 0) {
+        result.success = false;
+        result.message = getLastError();
+        return result;
+    }
+
+    const char* branch_name = git_reference_shorthand(head);
+    QString refspec = QString("refs/heads/%1:refs/heads/%1").arg(branch_name);
+    QByteArray refspec_bytes = refspec.toUtf8();
+    const char* refspec_str = refspec_bytes.constData();
+    git_strarray refspecs = { const_cast<char**>(&refspec_str), 1 };
+
+    git_push_options opts = GIT_PUSH_OPTIONS_INIT;
+
+    if (git_remote_push(remote, &refspecs, &opts) != 0) {
+        result.success = false;
+        result.message = getLastError();
         return result;
     }
 
@@ -326,34 +624,76 @@ GitTaskResult GitWorker::handleCommit(const GitTaskRequest& req)
     QString message = req.args[0];
     QStringList files = req.args.mid(1);
 
-    // Add files to staging
+    GitRepo repo;
+    if (!repo.open(req.repoPath)) {
+        result.success = false;
+        result.message = getLastError();
+        return result;
+    }
+
+    GitIndex index;
+    if (git_repository_index(index.ptr(), repo) != 0) {
+        result.success = false;
+        result.message = getLastError();
+        return result;
+    }
+
+    // Add files to index
     if (files.isEmpty()) {
-        auto addResult = runGitCommand(req.repoPath, {"add", "-A"});
-        if (addResult.exitCode != 0) {
-            result.success = false;
-            result.message = "Failed to stage files";
-            return result;
-        }
+        // Add all
+        git_index_add_all(index, nullptr, GIT_INDEX_ADD_DEFAULT, nullptr, nullptr);
     } else {
         for (const QString& file : files) {
-            auto addResult = runGitCommand(req.repoPath, {"add", file});
-            if (addResult.exitCode != 0) {
-                result.success = false;
-                result.message = QString("Failed to stage: %1").arg(file);
-                return result;
-            }
+            git_index_add_bypath(index, file.toUtf8().constData());
         }
     }
 
-    // Commit
-    auto cmdResult = runGitCommand(req.repoPath, {"commit", "-m", message});
-
-    if (cmdResult.exitCode != 0) {
+    if (git_index_write(index) != 0) {
         result.success = false;
-        result.message = "Commit failed";
-        if (!cmdResult.stdErr.isEmpty()) {
-            result.message = cmdResult.stdErr;
-        }
+        result.message = getLastError();
+        return result;
+    }
+
+    // Write tree
+    git_oid tree_oid;
+    if (git_index_write_tree(&tree_oid, index) != 0) {
+        result.success = false;
+        result.message = getLastError();
+        return result;
+    }
+
+    GitTree tree;
+    if (git_tree_lookup(tree.ptr(), repo, &tree_oid) != 0) {
+        result.success = false;
+        result.message = getLastError();
+        return result;
+    }
+
+    // Get signature
+    GitSignature sig;
+    if (git_signature_default(sig.ptr(), repo) != 0) {
+        result.success = false;
+        result.message = "Cannot create signature - configure user.name and user.email";
+        return result;
+    }
+
+    // Get parent commit
+    GitCommit parent;
+    GitRef head;
+    int has_parent = 0;
+    if (git_repository_head(head.ptr(), repo) == 0) {
+        git_commit_lookup(parent.ptr(), repo, git_reference_target(head));
+        has_parent = 1;
+    }
+
+    const git_commit* parents[] = { parent };
+    git_oid commit_oid;
+
+    if (git_commit_create(&commit_oid, repo, "HEAD", sig, sig,
+                          nullptr, message.toUtf8().constData(), tree,
+                          has_parent, has_parent ? parents : nullptr) != 0) {
+        result.success = false;
+        result.message = getLastError();
         return result;
     }
 
@@ -375,36 +715,77 @@ GitTaskResult GitWorker::handleCheckout(const GitTaskRequest& req)
 
     QString branchName = req.args[0];
 
-    // Stash if there are changes
+    GitRepo repo;
+    if (!repo.open(req.repoPath)) {
+        result.success = false;
+        result.message = getLastError();
+        return result;
+    }
+
+    // Stash if needed
     int stashCountBefore = getStashCount(req.repoPath);
     bool stashCreated = false;
 
     if (hasUncommittedChanges(req.repoPath)) {
-        runGitCommand(req.repoPath, {"stash"});
-        stashCreated = getStashCount(req.repoPath) > stashCountBefore;
+        GitSignature sig;
+        git_signature_default(sig.ptr(), repo);
+        git_oid stash_oid;
+        if (git_stash_save(&stash_oid, repo, sig, "auto-stash", GIT_STASH_DEFAULT) == 0) {
+            stashCreated = true;
+        }
     }
 
-    // Checkout
-    auto cmdResult = runGitCommand(req.repoPath, {"checkout", branchName});
+    // Try to find local branch
+    GitRef branch;
+    QString localRef = QString("refs/heads/%1").arg(branchName);
 
-    if (cmdResult.exitCode != 0) {
-        // Try creating and checking out the branch (for remote tracking)
-        auto createResult = runGitCommand(req.repoPath, {"checkout", "-b", branchName, QString("origin/%1").arg(branchName)});
-        if (createResult.exitCode != 0) {
-            result.success = false;
-            result.message = "Cannot switch branch";
-            if (!cmdResult.stdErr.isEmpty()) {
-                result.message = cmdResult.stdErr;
+    if (git_reference_lookup(branch.ptr(), repo, localRef.toUtf8().constData()) != 0) {
+        // Try to create from remote
+        QString remoteRef = QString("refs/remotes/origin/%1").arg(branchName);
+        GitRef remote_ref;
+
+        if (git_reference_lookup(remote_ref.ptr(), repo, remoteRef.toUtf8().constData()) == 0) {
+            // Create local branch from remote
+            GitCommit commit;
+            git_commit_lookup(commit.ptr(), repo, git_reference_target(remote_ref));
+
+            git_branch_create(branch.ptr(), repo, branchName.toUtf8().constData(), commit, 0);
+
+            // Set upstream
+            git_branch_set_upstream(branch, QString("origin/%1").arg(branchName).toUtf8().constData());
+        } else {
+            if (stashCreated) {
+                git_stash_pop(repo, 0, nullptr);
             }
+            result.success = false;
+            result.message = QString("Branch '%1' not found").arg(branchName);
             return result;
         }
     }
 
-    // Pop stash if we created one
+    // Checkout
+    GitObject target;
+    git_reference_peel(target.ptr(), branch, GIT_OBJECT_COMMIT);
+
+    git_checkout_options opts = GIT_CHECKOUT_OPTIONS_INIT;
+    opts.checkout_strategy = GIT_CHECKOUT_SAFE;
+
+    if (git_checkout_tree(repo, target, &opts) != 0) {
+        if (stashCreated) {
+            git_stash_pop(repo, 0, nullptr);
+        }
+        result.success = false;
+        result.message = getLastError();
+        return result;
+    }
+
+    // Update HEAD
+    git_repository_set_head(repo, localRef.toUtf8().constData());
+
+    // Pop stash if created
     if (stashCreated) {
-        auto popResult = runGitCommand(req.repoPath, {"stash", "pop"});
-        if (popResult.exitCode != 0) {
-            result.message = QString("Switched to '%1' but stash pop failed - resolve manually").arg(branchName);
+        if (git_stash_pop(repo, 0, nullptr) != 0) {
+            result.message = QString("Switched to '%1' but stash pop failed").arg(branchName);
         }
     }
 
@@ -434,14 +815,32 @@ GitTaskResult GitWorker::handleCreateBranch(const GitTaskRequest& req)
         return result;
     }
 
-    auto cmdResult = runGitCommand(req.repoPath, {"branch", branchName});
-
-    if (cmdResult.exitCode != 0) {
+    GitRepo repo;
+    if (!repo.open(req.repoPath)) {
         result.success = false;
-        result.message = "Cannot create branch";
-        if (!cmdResult.stdErr.isEmpty()) {
-            result.message = cmdResult.stdErr;
-        }
+        result.message = getLastError();
+        return result;
+    }
+
+    // Get HEAD commit
+    GitRef head;
+    if (git_repository_head(head.ptr(), repo) != 0) {
+        result.success = false;
+        result.message = getLastError();
+        return result;
+    }
+
+    GitCommit commit;
+    if (git_commit_lookup(commit.ptr(), repo, git_reference_target(head)) != 0) {
+        result.success = false;
+        result.message = getLastError();
+        return result;
+    }
+
+    GitRef new_branch;
+    if (git_branch_create(new_branch.ptr(), repo, branchName.toUtf8().constData(), commit, 0) != 0) {
+        result.success = false;
+        result.message = getLastError();
         return result;
     }
 
@@ -469,23 +868,37 @@ GitTaskResult GitWorker::handleDeleteBranch(const GitTaskRequest& req)
         return result;
     }
 
-    // Checkout master first if we're on the branch to delete
+    GitRepo repo;
+    if (!repo.open(req.repoPath)) {
+        result.success = false;
+        result.message = getLastError();
+        return result;
+    }
+
+    // Check if on this branch
     QString currentBranch = getCurrentBranch(req.repoPath);
     if (currentBranch == branchName) {
-        auto checkoutResult = runGitCommand(req.repoPath, {"checkout", "master"});
-        if (checkoutResult.exitCode != 0) {
-            runGitCommand(req.repoPath, {"checkout", "main"});
+        // Checkout master/main first
+        GitTaskRequest checkoutReq;
+        checkoutReq.repoPath = req.repoPath;
+        checkoutReq.args = QStringList() << "master";
+        GitTaskResult checkoutResult = handleCheckout(checkoutReq);
+        if (!checkoutResult.success) {
+            checkoutReq.args = QStringList() << "main";
+            handleCheckout(checkoutReq);
         }
     }
 
-    auto cmdResult = runGitCommand(req.repoPath, {"branch", "-D", branchName});
-
-    if (cmdResult.exitCode != 0) {
+    GitRef branch;
+    if (git_branch_lookup(branch.ptr(), repo, branchName.toUtf8().constData(), GIT_BRANCH_LOCAL) != 0) {
         result.success = false;
-        result.message = "Cannot delete branch";
-        if (!cmdResult.stdErr.isEmpty()) {
-            result.message = cmdResult.stdErr;
-        }
+        result.message = "Branch not found";
+        return result;
+    }
+
+    if (git_branch_delete(branch) != 0) {
+        result.success = false;
+        result.message = getLastError();
         return result;
     }
 
@@ -506,22 +919,95 @@ GitTaskResult GitWorker::handleMerge(const GitTaskRequest& req)
     }
 
     QString sourceBranch = req.args[0];
-    QString currentBranch = getCurrentBranch(req.repoPath);
 
-    auto cmdResult = runGitCommand(req.repoPath, {"merge", sourceBranch});
-
-    if (cmdResult.exitCode != 0) {
+    GitRepo repo;
+    if (!repo.open(req.repoPath)) {
         result.success = false;
-        result.message = "Merge failed";
-        if (!cmdResult.stdErr.isEmpty()) {
-            result.message = cmdResult.stdErr;
-        }
+        result.message = getLastError();
         return result;
     }
 
-    // Auto-delete source branch if on master/main
+    // Lookup source branch
+    GitRef source;
+    if (git_branch_lookup(source.ptr(), repo, sourceBranch.toUtf8().constData(), GIT_BRANCH_LOCAL) != 0) {
+        result.success = false;
+        result.message = "Source branch not found";
+        return result;
+    }
+
+    git_annotated_commit* annotated = nullptr;
+    if (git_annotated_commit_from_ref(&annotated, repo, source) != 0) {
+        result.success = false;
+        result.message = getLastError();
+        return result;
+    }
+
+    git_merge_analysis_t analysis;
+    git_merge_preference_t preference;
+    const git_annotated_commit* heads[] = { annotated };
+
+    git_merge_analysis(&analysis, &preference, repo, heads, 1);
+
+    if (analysis & GIT_MERGE_ANALYSIS_UP_TO_DATE) {
+        git_annotated_commit_free(annotated);
+        result.success = true;
+        result.message = "Already up to date";
+        return result;
+    }
+
+    git_merge_options merge_opts = GIT_MERGE_OPTIONS_INIT;
+    git_checkout_options checkout_opts = GIT_CHECKOUT_OPTIONS_INIT;
+    checkout_opts.checkout_strategy = GIT_CHECKOUT_SAFE;
+
+    if (git_merge(repo, heads, 1, &merge_opts, &checkout_opts) != 0) {
+        git_annotated_commit_free(annotated);
+        result.success = false;
+        result.message = getLastError();
+        return result;
+    }
+
+    // Check for conflicts
+    GitIndex index;
+    git_repository_index(index.ptr(), repo);
+    if (git_index_has_conflicts(index)) {
+        git_annotated_commit_free(annotated);
+        result.success = false;
+        result.message = "Merge conflicts - resolve manually";
+        return result;
+    }
+
+    // Create merge commit
+    GitSignature sig;
+    git_signature_default(sig.ptr(), repo);
+
+    git_oid tree_oid;
+    git_index_write_tree(&tree_oid, index);
+
+    GitTree tree;
+    git_tree_lookup(tree.ptr(), repo, &tree_oid);
+
+    GitRef head;
+    git_repository_head(head.ptr(), repo);
+
+    GitCommit head_commit;
+    git_commit_lookup(head_commit.ptr(), repo, git_reference_target(head));
+
+    GitCommit source_commit;
+    git_commit_lookup(source_commit.ptr(), repo, git_reference_target(source));
+
+    QString msg = QString("Merge branch '%1'").arg(sourceBranch);
+    const git_commit* parents[] = { head_commit, source_commit };
+    git_oid new_commit_oid;
+    git_commit_create(&new_commit_oid, repo, "HEAD", sig, sig,
+                      nullptr, msg.toUtf8().constData(), tree, 2, parents);
+
+    git_repository_state_cleanup(repo);
+    git_annotated_commit_free(annotated);
+
+    // Auto-delete source if on master/main
+    QString currentBranch = getCurrentBranch(req.repoPath);
     if (currentBranch == "master" || currentBranch == "main") {
-        runGitCommand(req.repoPath, {"branch", "-d", sourceBranch});
+        git_branch_delete(source);
     }
 
     result.success = true;
@@ -534,16 +1020,38 @@ GitTaskResult GitWorker::handleReset(const GitTaskRequest& req)
     GitTaskResult result;
     result.requestId = req.requestId;
 
-    auto cmdResult = runGitCommand(req.repoPath, {"reset"});
-
-    if (cmdResult.exitCode != 0) {
+    GitRepo repo;
+    if (!repo.open(req.repoPath)) {
         result.success = false;
-        result.message = "Reset failed";
-        if (!cmdResult.stdErr.isEmpty()) {
-            result.message = cmdResult.stdErr;
-        }
+        result.message = getLastError();
         return result;
     }
+
+    GitIndex index;
+    if (git_repository_index(index.ptr(), repo) != 0) {
+        result.success = false;
+        result.message = getLastError();
+        return result;
+    }
+
+    // Get HEAD tree
+    GitRef head;
+    git_repository_head(head.ptr(), repo);
+
+    GitCommit commit;
+    git_commit_lookup(commit.ptr(), repo, git_reference_target(head));
+
+    GitTree tree;
+    git_commit_tree(tree.ptr(), commit);
+
+    // Reset index to HEAD
+    if (git_index_read_tree(index, tree) != 0) {
+        result.success = false;
+        result.message = getLastError();
+        return result;
+    }
+
+    git_index_write(index);
 
     result.success = true;
     result.message = "Reset successful";
@@ -555,14 +1063,19 @@ GitTaskResult GitWorker::handleRestore(const GitTaskRequest& req)
     GitTaskResult result;
     result.requestId = req.requestId;
 
-    auto cmdResult = runGitCommand(req.repoPath, {"restore", "."});
-
-    if (cmdResult.exitCode != 0) {
+    GitRepo repo;
+    if (!repo.open(req.repoPath)) {
         result.success = false;
-        result.message = "Restore failed";
-        if (!cmdResult.stdErr.isEmpty()) {
-            result.message = cmdResult.stdErr;
-        }
+        result.message = getLastError();
+        return result;
+    }
+
+    git_checkout_options opts = GIT_CHECKOUT_OPTIONS_INIT;
+    opts.checkout_strategy = GIT_CHECKOUT_FORCE;
+
+    if (git_checkout_head(repo, &opts) != 0) {
+        result.success = false;
+        result.message = getLastError();
         return result;
     }
 
@@ -576,13 +1089,39 @@ GitTaskResult GitWorker::handleStash(const GitTaskRequest& req)
     GitTaskResult result;
     result.requestId = req.requestId;
 
-    int stashCountBefore = getStashCount(req.repoPath);
-    runGitCommand(req.repoPath, {"stash"});
-    int stashCountAfter = getStashCount(req.repoPath);
+    GitRepo repo;
+    if (!repo.open(req.repoPath)) {
+        result.success = false;
+        result.message = getLastError();
+        return result;
+    }
+
+    GitSignature sig;
+    if (git_signature_default(sig.ptr(), repo) != 0) {
+        result.success = false;
+        result.message = "Cannot create signature";
+        return result;
+    }
+
+    git_oid stash_oid;
+    int err = git_stash_save(&stash_oid, repo, sig, nullptr, GIT_STASH_DEFAULT);
+
+    if (err == GIT_ENOTFOUND) {
+        result.success = true;
+        result.data = false;
+        result.message = "Nothing to stash";
+        return result;
+    }
+
+    if (err != 0) {
+        result.success = false;
+        result.message = getLastError();
+        return result;
+    }
 
     result.success = true;
-    result.data = (stashCountAfter > stashCountBefore);
-    result.message = (stashCountAfter > stashCountBefore) ? "Stash created" : "Nothing to stash";
+    result.data = true;
+    result.message = "Stash created";
     return result;
 }
 
@@ -591,14 +1130,16 @@ GitTaskResult GitWorker::handleStashPop(const GitTaskRequest& req)
     GitTaskResult result;
     result.requestId = req.requestId;
 
-    auto cmdResult = runGitCommand(req.repoPath, {"stash", "pop"});
-
-    if (cmdResult.exitCode != 0) {
+    GitRepo repo;
+    if (!repo.open(req.repoPath)) {
         result.success = false;
-        result.message = "Stash pop failed";
-        if (!cmdResult.stdErr.isEmpty()) {
-            result.message = cmdResult.stdErr;
-        }
+        result.message = getLastError();
+        return result;
+    }
+
+    if (git_stash_pop(repo, 0, nullptr) != 0) {
+        result.success = false;
+        result.message = getLastError();
         return result;
     }
 
@@ -612,31 +1153,51 @@ GitTaskResult GitWorker::handleGetBranches(const GitTaskRequest& req)
     GitTaskResult result;
     result.requestId = req.requestId;
 
+    GitRepo repo;
+    if (!repo.open(req.repoPath)) {
+        result.success = false;
+        result.message = getLastError();
+        return result;
+    }
+
     QStringList localBranches;
     QStringList remoteBranches;
 
-    // Get local branches
-    auto localResult = runGitCommand(req.repoPath, {"branch", "--format=%(refname:short)"});
-    if (localResult.exitCode == 0 && !localResult.stdOut.isEmpty()) {
-        localBranches = localResult.stdOut.split('\n', Qt::SkipEmptyParts);
-    }
+    // Local branches
+    git_branch_iterator* iter = nullptr;
+    git_branch_iterator_new(&iter, repo, GIT_BRANCH_LOCAL);
 
-    // Get remote branches
-    auto remoteResult = runGitCommand(req.repoPath, {"branch", "-r", "--format=%(refname:short)"});
-    if (remoteResult.exitCode == 0 && !remoteResult.stdOut.isEmpty()) {
-        QStringList rawRemotes = remoteResult.stdOut.split('\n', Qt::SkipEmptyParts);
-        for (const QString& remote : rawRemotes) {
-            QString branch = remote;
-            if (branch.startsWith("origin/")) {
-                branch = branch.mid(7);
-            }
-            if (!branch.contains("HEAD") && !localBranches.contains(branch)) {
-                remoteBranches.append(branch);
-            }
-        }
+    git_reference* ref = nullptr;
+    git_branch_t type;
+    while (git_branch_next(&ref, &type, iter) == 0) {
+        const char* name = nullptr;
+        git_branch_name(&name, ref);
+        localBranches.append(QString::fromUtf8(name));
+        git_reference_free(ref);
     }
+    git_branch_iterator_free(iter);
+
+    // Remote branches
+    git_branch_iterator_new(&iter, repo, GIT_BRANCH_REMOTE);
+    while (git_branch_next(&ref, &type, iter) == 0) {
+        const char* name = nullptr;
+        git_branch_name(&name, ref);
+        QString branchName = QString::fromUtf8(name);
+        // Remove "origin/" prefix
+        if (branchName.startsWith("origin/")) {
+            branchName = branchName.mid(7);
+        }
+        if (!branchName.contains("HEAD") && !localBranches.contains(branchName)) {
+            remoteBranches.append(branchName);
+        }
+        git_reference_free(ref);
+    }
+    git_branch_iterator_free(iter);
 
     QString currentBranch = getCurrentBranch(req.repoPath);
+
+    localBranches.sort(Qt::CaseInsensitive);
+    remoteBranches.sort(Qt::CaseInsensitive);
 
     QVariantMap branchData;
     branchData["local"] = localBranches;
@@ -653,42 +1214,67 @@ GitTaskResult GitWorker::handleGetChanges(const GitTaskRequest& req)
     GitTaskResult result;
     result.requestId = req.requestId;
 
+    GitRepo repo;
+    if (!repo.open(req.repoPath)) {
+        result.success = false;
+        result.message = getLastError();
+        return result;
+    }
+
     QStringList modifiedFiles;
     QStringList stagedFiles;
 
-    // Get modified files (unstaged)
-    auto modifiedResult = runGitCommand(req.repoPath, {"ls-files", "-m", "-d", "-o", "-z", "--exclude-standard"});
-    if (modifiedResult.exitCode == 0 && !modifiedResult.stdOut.isEmpty()) {
-        modifiedFiles = modifiedResult.stdOut.split(QChar('\0'), Qt::SkipEmptyParts);
+    git_status_options opts = GIT_STATUS_OPTIONS_INIT;
+    opts.show = GIT_STATUS_SHOW_INDEX_AND_WORKDIR;
+    opts.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED | GIT_STATUS_OPT_RECURSE_UNTRACKED_DIRS;
+
+    GitStatusList status;
+    if (git_status_list_new(status.ptr(), repo, &opts) != 0) {
+        result.success = false;
+        result.message = getLastError();
+        return result;
     }
 
-    // Get staged files
-    auto stagedResult = runGitCommand(req.repoPath, {"diff", "--name-only", "--cached"});
-    if (stagedResult.exitCode == 0 && !stagedResult.stdOut.isEmpty()) {
-        stagedFiles = stagedResult.stdOut.split('\n', Qt::SkipEmptyParts);
-    }
+    size_t count = git_status_list_entrycount(status);
+    for (size_t i = 0; i < count; i++) {
+        const git_status_entry* entry = git_status_byindex(status, i);
 
-    // Filter out built-in ignore patterns
-    QStringList ignorePatterns = {".idea/", "__pycache__/", "venv/"};
-    QStringList filteredModified;
-    for (const QString& file : modifiedFiles) {
-        bool ignore = false;
-        for (const QString& pattern : ignorePatterns) {
-            if (file.startsWith(pattern) || file.contains("/" + pattern)) {
-                ignore = true;
-                break;
+        QString path;
+        if (entry->index_to_workdir && entry->index_to_workdir->new_file.path) {
+            path = QString::fromUtf8(entry->index_to_workdir->new_file.path);
+        } else if (entry->head_to_index && entry->head_to_index->new_file.path) {
+            path = QString::fromUtf8(entry->head_to_index->new_file.path);
+        }
+
+        if (path.isEmpty()) continue;
+
+        // Filter patterns
+        if (path.startsWith(".idea/") || path.contains("/__pycache__/") || path.startsWith("venv/")) {
+            continue;
+        }
+
+        // Staged changes
+        if (entry->status & (GIT_STATUS_INDEX_NEW | GIT_STATUS_INDEX_MODIFIED |
+                             GIT_STATUS_INDEX_DELETED | GIT_STATUS_INDEX_RENAMED)) {
+            if (!stagedFiles.contains(path)) {
+                stagedFiles.append(path);
             }
         }
-        if (!ignore && !stagedFiles.contains(file)) {
-            filteredModified.append(file);
+
+        // Workdir changes (not staged)
+        if (entry->status & (GIT_STATUS_WT_NEW | GIT_STATUS_WT_MODIFIED |
+                             GIT_STATUS_WT_DELETED | GIT_STATUS_WT_RENAMED)) {
+            if (!modifiedFiles.contains(path) && !stagedFiles.contains(path)) {
+                modifiedFiles.append(path);
+            }
         }
     }
 
-    filteredModified.sort(Qt::CaseInsensitive);
+    modifiedFiles.sort(Qt::CaseInsensitive);
     stagedFiles.sort(Qt::CaseInsensitive);
 
     QVariantMap changeData;
-    changeData["modified"] = filteredModified;
+    changeData["modified"] = modifiedFiles;
     changeData["staged"] = stagedFiles;
 
     result.success = true;
@@ -709,7 +1295,7 @@ GitTaskResult GitWorker::handleGetDiff(const GitTaskRequest& req)
 
     QString filePath = req.args[0];
 
-    // Check for binary extensions
+    // Check for binary
     QStringList binaryExtensions = {
         ".ods", ".odg", ".odt", ".Z3PRT", ".Z3ASM", ".exe",
         ".Z3DRW", ".stp", ".step", ".xrs", ".pdf"
@@ -723,9 +1309,39 @@ GitTaskResult GitWorker::handleGetDiff(const GitTaskRequest& req)
         }
     }
 
-    auto cmdResult = runGitCommand(req.repoPath, {"diff", filePath});
+    GitRepo repo;
+    if (!repo.open(req.repoPath)) {
+        result.success = false;
+        result.message = getLastError();
+        return result;
+    }
+
+    git_diff_options opts = GIT_DIFF_OPTIONS_INIT;
+    QByteArray pathBytes = filePath.toUtf8();
+    char* pathStr = pathBytes.data();
+    opts.pathspec.strings = &pathStr;
+    opts.pathspec.count = 1;
+
+    GitDiff diff;
+    if (git_diff_index_to_workdir(diff.ptr(), repo, nullptr, &opts) != 0) {
+        result.success = false;
+        result.message = getLastError();
+        return result;
+    }
+
+    QString diffOutput;
+
+    git_diff_print(diff, GIT_DIFF_FORMAT_PATCH,
+        [](const git_diff_delta*, const git_diff_hunk*,
+           const git_diff_line* line, void* payload) -> int {
+            QString* output = static_cast<QString*>(payload);
+            if (line->content && line->content_len > 0) {
+                *output += QString::fromUtf8(line->content, static_cast<int>(line->content_len));
+            }
+            return 0;
+        }, &diffOutput);
 
     result.success = true;
-    result.data = cmdResult.stdOut;
+    result.data = diffOutput;
     return result;
 }
