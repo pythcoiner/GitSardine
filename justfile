@@ -40,3 +40,4 @@ test: build
 # Clean build directory
 clean:
     rm -rf build
+
