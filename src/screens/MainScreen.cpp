@@ -16,6 +16,7 @@ MainScreen::MainScreen(QWidget *parent)
     , m_nextRequestId(1)
     , m_buttonsEnabled(false)
     , m_isMasterBranch(false)
+    , m_pendingPush(false)
 {
     setupUi();
     setupConnections();
@@ -503,6 +504,7 @@ void MainScreen::onCommitClicked()
 void MainScreen::onCommitPushClicked()
 {
     // First commit, then push on success (handled in onGitTaskCompleted)
+    m_pendingPush = true;
     onCommitClicked();
 }
 
@@ -602,6 +604,7 @@ void MainScreen::onGitTaskCompleted(GitTaskResult result)
 
     if (!result.success) {
         setLabel(result.message);
+        m_pendingPush = false;  // Cancel pending push on any failure
         return;
     }
 
@@ -634,6 +637,12 @@ void MainScreen::onGitTaskCompleted(GitTaskResult result)
             req.repoPath = m_currentRepoPath;
             m_gitWorker->queueTask(req);
         }
+    }
+
+    // Push after successful commit if pending
+    if (result.task == GitTask::Commit && m_pendingPush) {
+        m_pendingPush = false;
+        onPushClicked();
     }
 
     // Handle specific task results

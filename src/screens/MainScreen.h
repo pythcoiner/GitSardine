@@ -99,6 +99,7 @@ private:
     int m_nextRequestId;
     bool m_buttonsEnabled;
     bool m_isMasterBranch;
+    bool m_pendingPush;
 
     // Timers
     QTimer* m_spinnerTimer;
