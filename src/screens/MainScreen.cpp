@@ -650,6 +650,20 @@ void MainScreen::onGitTaskCompleted(GitTaskResult result)
         onPushClicked();
     }
 
+    // Refresh repo status after push/pull/fetch/commit
+    if (result.task == GitTask::Push ||
+        result.task == GitTask::Pull ||
+        result.task == GitTask::Fetch ||
+        result.task == GitTask::Commit) {
+        if (!m_currentRepoPath.isEmpty() && m_gitWorker) {
+            GitTaskRequest req;
+            req.task = GitTask::CheckStatus;
+            req.repoPath = m_currentRepoPath;
+            req.requestId = generateRequestId();
+            m_gitWorker->queueTask(req);
+        }
+    }
+
     // Handle specific task results
     if (result.data.type() == QVariant::Map) {
         QVariantMap data = result.data.toMap();
